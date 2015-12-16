@@ -15,7 +15,7 @@ import sys
 import datetime
 import locale
 import time
-
+import _winreg as winreg
 
 from proxy import xlog
 from config import config
@@ -38,6 +38,25 @@ web_ui_path = os.path.join(current_path, os.path.pardir, "web_ui")
 
 
 import yaml
+
+def get_proxy_state():
+    REG_PATH = r'Software\Microsoft\Windows\CurrentVersion\Internet Settings'
+    INTERNET_SETTINGS = winreg.OpenKey(winreg.HKEY_CURRENT_USER,REG_PATH,0, winreg.KEY_ALL_ACCESS)
+    try:
+        AutoConfigURL, reg_type = winreg.QueryValueEx(INTERNET_SETTINGS, 'AutoConfigURL')
+        if AutoConfigURL:
+            return ("Auto proxy enabled",AutoConfigURL)
+    except Exception as e:
+        pass
+
+    try:
+        ProxyEnable, reg_type = winreg.QueryValueEx(INTERNET_SETTINGS, 'ProxyEnable')
+        ProxyServer = winreg.QueryValueEx(INTERNET_SETTINGS, 'ProxyServer')[0]
+        if ProxyEnable:
+            return ("Proxy enabled",ProxyServer)
+    except Exception as e:
+        pass
+    return ("Proxy disabled","")
 
 class User_special(object):
     def __init__(self):
@@ -409,7 +428,7 @@ class ControlHandler(simple_http_server.HttpServerHandler):
                    "python_version": platform.python_version(),
                    "proxy_listen":config.LISTEN_IP + ":" + str(config.LISTEN_PORT),
                    "gae_appid":"|".join(config.GAE_APPIDS),
-                   "network_state":check_ip.network_ok,
+                   "network_state":check_ip.network_is_ok(),
                    "connected_link_new":len(https_manager.new_conn_pool.pool),
                    "connected_link_used":len(https_manager.gae_conn_pool.pool),
                    "working_appid":"|".join(appid_manager.working_appid_list),
@@ -424,6 +443,8 @@ class ControlHandler(simple_http_server.HttpServerHandler):
                    "low_prior_connecting_num":connect_control.low_prior_connecting_num,
                    "high_prior_lock":len(connect_control.high_prior_lock),
                    "low_prior_lock":len(connect_control.low_prior_lock),
+                   "proxy_state":get_proxy_state()[0],
+                   "proxy_url":get_proxy_state()[1],
                    }
         data = json.dumps(res_arr, indent=0, sort_keys=True)
         self.send_response('text/html', data)
@@ -437,12 +458,21 @@ class ControlHandler(simple_http_server.HttpServerHandler):
             if reqs['cmd'] == ['get_config']:
                 data = json.dumps(user_config.user_special, default=lambda o: o.__dict__)
             elif reqs['cmd'] == ['set_config']:
-                user_config.user_special.appid = self.postvars['appid'][0]
+                appids = self.postvars['appid'][0]
+                if appids != user_config.user_special.appid:
+                    fail_appid_list = google_ip.test_appids(appids)
+                    if len(fail_appid_list):
+                        fail_appid = "|".join(fail_appid_list)
+                        return self.send_response('text/html', '{"res":"fail", "reason":"appid fail:%s"}' % fail_appid)
+
+                    user_config.user_special.appid = appids
                 user_config.user_special.password = self.postvars['password'][0]
                 user_config.user_special.proxy_enable = self.postvars['proxy_enable'][0]
                 user_config.user_special.proxy_type = self.postvars['proxy_type'][0]
                 user_config.user_special.proxy_host = self.postvars['proxy_host'][0]
-                user_config.user_special.proxy_port = int(self.postvars['proxy_port'][0])
+                user_config.user_special.proxy_port = self.postvars['proxy_port'][0]
+                if not user_config.user_special.proxy_port:
+                    user_config.user_special.proxy_port = 0
                 user_config.user_special.proxy_user = self.postvars['proxy_user'][0]
                 user_config.user_special.proxy_passwd = self.postvars['proxy_passwd'][0]
                 user_config.user_special.host_appengine_mode = self.postvars['host_appengine_mode'][0]
@@ -698,4 +728,3 @@ class ControlHandler(simple_http_server.HttpServerHandler):
                 google_ip.scan_all_exist_ip()
         else:
             return self.send_not_exist()
-
